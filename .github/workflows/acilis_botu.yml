@@ -1,15 +1,16 @@
 name: ABD açılış botu
 
 on:
-  schedule:
-    - cron: "5 13 * * 1-5"   # Yaz saati: ABD açılışı 16:30 TR
-    - cron: "5 14 * * 1-5"   # Kış saati: ABD açılışı 17:30 TR
   workflow_dispatch:
     inputs:
       test:
         description: "Test modu (saat kontrolü yok, hemen tara ve bir kez kontrol et)"
         type: boolean
         default: true
+
+concurrency:
+  group: acilis-botu
+  cancel-in-progress: false
 
 jobs:
   tara:
