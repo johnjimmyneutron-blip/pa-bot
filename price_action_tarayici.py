@@ -72,6 +72,7 @@ MIN_ISLEM_DEGERI = {
     "bist_likit": 20_000_000,
     "sp500": 5_000_000,   # USD
     "nasdaq100": 5_000_000,  # USD
+    "emtia": 0,
     "kripto": 0,
     "dosya": 0,
 }
@@ -177,7 +178,56 @@ def evren(piyasa: str, dosya: str | None) -> list[str]:
         return sp500_sembolleri()
     if piyasa == "nasdaq100":
         return list(NASDAQ100_SEMBOLLER)
+    if piyasa == "emtia":
+        return list(EMTIA)
     raise ValueError(f"Bilinmeyen piyasa: {piyasa}")
+
+
+def fmt(x: float) -> str:
+    """Fiyatı ürüne uygun ondalıkla yazar: döviz/bakır gibi küçük fiyatlar 4, diğerleri 2 basamak."""
+    x = float(x)
+    return f"{x:.4f}" if abs(x) < 10 else f"{x:.2f}"
+
+
+# Emtia, döviz ve endeksler: Yahoo sembolü -> görünen ad, TradingView sembolü
+EMTIA = {
+    "BZ=F": ("Brent Petrol", "TVC:UKOIL"),
+    "GC=F": ("Altın (XAUUSD)", "OANDA:XAUUSD"),
+    "SI=F": ("Gümüş (XAGUSD)", "OANDA:XAGUSD"),
+    "NG=F": ("Doğalgaz", "NYMEX:NG1!"),
+    "HG=F": ("Bakır", "COMEX:HG1!"),
+    "PA=F": ("Paladyum", "NYMEX:PA1!"),
+    "PL=F": ("Platin", "NYMEX:PL1!"),
+    "CC=F": ("Kakao", "ICEUS:CC1!"),
+    "KC=F": ("Kahve", "ICEUS:KC1!"),
+    "SB=F": ("Şeker", "ICEUS:SB1!"),
+    "ZC=F": ("Mısır", "CBOT:ZC1!"),
+    "ZW=F": ("Buğday", "CBOT:ZW1!"),
+    "CT=F": ("Pamuk", "ICEUS:CT1!"),
+    "EURUSD=X": ("EUR/USD", "FX:EURUSD"),
+    "GBPUSD=X": ("GBP/USD", "FX:GBPUSD"),
+    "CHF=X": ("USD/CHF", "FX:USDCHF"),
+    "JPY=X": ("USD/JPY", "FX:USDJPY"),
+    "^NDX": ("Nasdaq-100", "NASDAQ:NDX"),
+    "^GSPC": ("S&P 500", "SP:SPX"),
+    "^DJI": ("Dow Jones", "DJ:DJI"),
+}
+
+
+def gorunen_ad(sembol: str) -> str:
+    if sembol in EMTIA:
+        return EMTIA[sembol][0]
+    return sembol.removesuffix(".IS").removesuffix("-USD")
+
+
+def tamamlanmis_mumlar(d: pd.DataFrame) -> pd.DataFrame:
+    """Bugüne ait (henüz kapanmamış) günlük mumu atar. 7/24'e yakın işlem gören
+    döviz ve vadelilerde sabah taramasında son mum yarım olur."""
+    from datetime import timezone
+    idx = d.index
+    bugun = datetime.now(idx.tz).date() if getattr(idx, "tz", None) else \
+        datetime.now(timezone.utc).date()
+    return d[[t.date() < bugun for t in idx]]
 
 
 # Piyasa genel yönü için kullanılan endeks
@@ -186,7 +236,9 @@ ENDEKS = {"sp500": "SPY", "nasdaq100": "QQQ", "bist": "XU100.IS", "bist_likit": 
 
 
 def tradingview_linki(sembol: str) -> str:
-    if sembol.endswith(".IS"):
+    if sembol in EMTIA:
+        tv = EMTIA[sembol][1]
+    elif sembol.endswith(".IS"):
         tv = "BIST:" + sembol[:-3]
     elif sembol.endswith("-USD"):
         tv = "BINANCE:" + sembol[:-4] + "USDT"
@@ -291,7 +343,8 @@ def endeks_durumu(d: pd.DataFrame) -> dict:
     return {"zayif": bool(nedenler), "aciklama": ", ".join(nedenler), "getiri20": getiri20}
 
 
-def baglam(d: pd.DataFrame, endeks: dict | None) -> tuple[int, list[str], list[str]]:
+def baglam(d: pd.DataFrame, endeks: dict | None,
+           bosluk_kontrol: bool = True) -> tuple[int, list[str], list[str]]:
     """Kurgudan bağımsız, hissenin genel durumu: endeks, göreli güç, haber boşluğu, 52H zirve."""
     puan, neden, uyari = 0, [], []
     c = float(d["Close"].iloc[-1])
@@ -310,13 +363,13 @@ def baglam(d: pd.DataFrame, endeks: dict | None) -> tuple[int, list[str], list[s
     onceki_kapanis = d["Close"].shift(1).tail(45)
     bosluk = (son["Open"] / onceki_kapanis - 1) * 100
     buyukler = bosluk[bosluk <= -AYAR["bosluk_esik_yuzde"]]
-    if len(buyukler):
+    if bosluk_kontrol and len(buyukler):
         tarih = buyukler.index[-1]
         seviye = float(onceki_kapanis.loc[tarih])
         if c < seviye:
             puan -= 1
             uyari.append(f"{tarih:%d.%m} tarihli %{-buyukler.iloc[-1]:.1f} aşağı boşluk kapanmadı "
-                         f"(boşluk öncesi {seviye:.2f}) — bilanço/kötü haber olabilir")
+                         f"(boşluk öncesi {fmt(seviye)}) — bilanço/kötü haber olabilir")
     yuksek = float(d["High"].tail(250).max())
     uzak = (1 - c / yuksek) * 100
     if uzak >= AYAR["zirve_uzaklik_uyari"]:
@@ -386,7 +439,13 @@ def analiz_et(sembol: str, d: pd.DataFrame, min_deger: float,
     sma50_yukari = son["SMA50"] > d["SMA50"].iloc[-11]
     ma_trend = (not saf) and c > son["SMA50"] and sma50_yukari
 
-    b_puan, b_neden, b_uyari = baglam(d, endeks) if AYAR["yeni_kurallar"] else (0, [], [])
+    # Vadeli kontrat devirleri grafikte yapay boşluk yaratır: onlarda boşluk kontrolü yapılmaz
+    b_puan, b_neden, b_uyari = baglam(d, endeks, not sembol.endswith("=F")) \
+        if AYAR["yeni_kurallar"] else (0, [], [])
+    # Hacim verisi olmayan ürünler (döviz): hacim kuralları puan veremez, eşik buna göre iner
+    hacim_yok = float(d["Volume"].tail(20).fillna(0).sum()) == 0
+    esik_gc = AYAR["min_puan"] - (1 if hacim_yok else 0)
+    esik_kr = AYAR["min_puan"] - (2 if hacim_yok else 0)
     sonuc: list[Aday] = []
 
     # ======================= KURGU 1: Trend içi geri çekilme =======================
@@ -417,7 +476,7 @@ def analiz_et(sembol: str, d: pd.DataFrame, min_deger: float,
                 break
         if destek:
             puan += 2
-            neden.append(f"Yatay destekte ({destek['alt']:.2f}-{destek['ust']:.2f}, "
+            neden.append(f"Yatay destekte ({fmt(destek['alt'])}-{fmt(destek['ust'])}, "
                          f"{destek['dokunus']} dokunuş)")
         dinamik = (not saf) and \
             (son3_dip <= son["SMA20"] * 1.01 or son3_dip <= son["SMA50"] * 1.01) \
@@ -438,9 +497,9 @@ def analiz_et(sembol: str, d: pd.DataFrame, min_deger: float,
                 break
         if rol is not None:
             if destek and destek["alt"] - tol <= rol <= destek["ust"] + tol:
-                puan += 1; neden.append(f"Destek, eski dirençle çakışıyor (~{rol:.2f})")
+                puan += 1; neden.append(f"Destek, eski dirençle çakışıyor (~{fmt(rol)})")
             else:
-                puan += 2; neden.append(f"Kırılan direnç desteğe döndü (~{rol:.2f})")
+                puan += 2; neden.append(f"Kırılan direnç desteğe döndü (~{fmt(rol)})")
 
         sinyal, sp = mum_sinyali(d)
         if sinyal:
@@ -472,7 +531,7 @@ def analiz_et(sembol: str, d: pd.DataFrame, min_deger: float,
         neden.append(f"Hedef: {hedef_not}")
         ara = [p for _, p in tepeler[-15:] if giris + 0.3 * a < p < hedef - 0.3 * a]
         if ara:
-            uyari.append(f"Hedefe giderken küçük direnç var (~{min(ara):.2f})")
+            uyari.append(f"Hedefe giderken küçük direnç var (~{fmt(min(ara))})")
         if not sinyal:
             uyari.append("Dönüş mumu yok: giriş için sinyal mumu bekleyin")
         puan += b_puan; neden += b_neden; uyari += b_uyari
@@ -484,8 +543,8 @@ def analiz_et(sembol: str, d: pd.DataFrame, min_deger: float,
             aday.elenme = "Destek ya da dönüş mumu yok"
         elif rr < AYAR["min_rr"]:
             aday.elenme = f"R/Ö {rr:.1f} < {AYAR['min_rr']:.1f} (hedef çok yakın)"
-        elif puan < AYAR["min_puan"]:
-            aday.elenme = f"Puan {puan} < {AYAR['min_puan']}"
+        elif puan < esik_gc:
+            aday.elenme = f"Puan {puan} < {esik_gc}"
         sonuc.append(aday)
 
     # ============================ KURGU 2: Kırılım ============================
@@ -497,6 +556,8 @@ def analiz_et(sembol: str, d: pd.DataFrame, min_deger: float,
             puan += 2; neden.append(f"Güçlü hacim teyidi ({hacim_kat:.1f}x ortalama)")
         elif hacim_kat >= AYAR["hacim_kat_orta"]:
             puan += 1; neden.append(f"Hacim ortalamanın üstünde ({hacim_kat:.1f}x)")
+        elif hacim_yok:
+            neden.append("Hacim verisi yok: hacim kuralları atlandı, eşik düşürüldü")
         else:
             uyari.append(f"Hacim zayıf ({hacim_kat:.1f}x ortalama)")
         atr_ort = d["ATR"].iloc[-120:-5].mean()
@@ -528,8 +589,8 @@ def analiz_et(sembol: str, d: pd.DataFrame, min_deger: float,
         aday = Aday(sembol, "Kırılım", "Sinyal var", puan, c, giris, stop, hedef,
                     AYAR["min_rr"], neden, uyari)
         _stop_uyarisi(aday)
-        if puan < AYAR["min_puan"]:
-            aday.elenme = f"Puan {puan} < {AYAR['min_puan']}"
+        if puan < esik_kr:
+            aday.elenme = f"Puan {puan} < {esik_kr}"
         sonuc.append(aday)
 
     return sonuc
@@ -549,9 +610,9 @@ def _tablo(adaylar: list[Aday]) -> str:
           <td>{i}</td>
           <td><a href="{tradingview_linki(a.sembol)}" target="_blank"><b>{html.escape(a.sembol)}</b></a></td>
           <td>{a.kurgu}</td><td class="p">{a.puan}</td>
-          <td>{a.fiyat:.2f}</td><td>{a.giris:.2f}</td>
-          <td>{a.stop:.2f} <span class="k">(-%{a.stop_yuzde:.1f})</span></td>
-          <td>{a.hedef:.2f}</td><td>{a.rr:.1f}</td>
+          <td>{fmt(a.fiyat)}</td><td>{fmt(a.giris)}</td>
+          <td>{fmt(a.stop)} <span class="k">(-%{a.stop_yuzde:.1f})</span></td>
+          <td>{fmt(a.hedef)}</td><td>{a.rr:.1f}</td>
           <td><ul>{''.join(f'<li>{html.escape(g)}</li>' for g in a.gerekceler)}{uy}</ul></td>
         </tr>""")
     return ("<table><tr><th>#</th><th>Sembol</th><th>Kurgu</th><th>Puan</th><th>Son fiyat</th>"
@@ -605,6 +666,8 @@ def tara(piyasa: str, dosya: str | None = None, adet: int = 10) -> dict:
     semboller = evren(piyasa, dosya)
     print(f"{len(semboller)} sembol taranacak ({anahtar}).")
     veri = veri_indir(semboller)
+    if anahtar == "emtia":
+        veri = {s: tamamlanmis_mumlar(d) for s, d in veri.items()}
     eksik = [s for s in semboller if s not in veri]
 
     endeks = None
@@ -663,7 +726,7 @@ def seans_uyarisi(piyasa: str) -> str | None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Price action tarayıcı")
-    ap.add_argument("--piyasa", choices=["bist", "bist_likit", "sp500", "nasdaq100", "kripto"], default="bist")
+    ap.add_argument("--piyasa", choices=["bist", "bist_likit", "sp500", "nasdaq100", "emtia", "kripto"], default="bist")
     ap.add_argument("--dosya", help="Sembol listesi dosyası (her satırda bir Yahoo sembolü)")
     ap.add_argument("--adet", type=int, default=10, help="Her bölümde listelenecek aday sayısı")
     ap.add_argument("--saf", action="store_true",
@@ -694,8 +757,8 @@ def main() -> None:
         print(f"\n{baslik}:")
         for i, a in enumerate(liste, 1):
             uy = "  ⚠ " + "; ".join(a.uyarilar) if a.uyarilar else ""
-            print(f" {i:2}. {a.sembol:<10} {a.kurgu:<13} puan {a.puan:2}  giriş {a.giris:.2f}  "
-                  f"stop {a.stop:.2f} (-%{a.stop_yuzde:.1f})  hedef {a.hedef:.2f}  "
+            print(f" {i:2}. {a.sembol:<10} {a.kurgu:<13} puan {a.puan:2}  giriş {fmt(a.giris)}  "
+                  f"stop {fmt(a.stop)} (-%{a.stop_yuzde:.1f})  hedef {fmt(a.hedef)}  "
                   f"R/Ö {a.rr:.1f}{uy}")
         if not liste:
             print("  (yok)")

@@ -109,8 +109,8 @@ def liste_mesaji(sinyal, izle, piyasa: str, taranan: int, izleme_dk: int,
         for i, a in enumerate(sinyal, 1):
             m.append(f"{i}. <a href=\"{pat.tradingview_linki(a.sembol)}\"><b>"
                      f"{e(sembol_adi(a.sembol))}</b></a> — {e(a.kurgu)}, puan {a.puan}")
-            m.append(f"   Giriş {a.giris:.2f} · Stop {a.stop:.2f} (-%{a.stop_yuzde:.1f})"
-                     f" · Hedef {a.hedef:.2f} · R/Ö {a.rr:.1f}")
+            m.append(f"   Giriş {pat.fmt(a.giris)} · Stop {pat.fmt(a.stop)} (-%{a.stop_yuzde:.1f})"
+                     f" · Hedef {pat.fmt(a.hedef)} · R/Ö {a.rr:.1f}")
             for u in a.uyarilar:
                 m.append(f"   ⚠ {e(u)}")
     else:
@@ -118,8 +118,8 @@ def liste_mesaji(sinyal, izle, piyasa: str, taranan: int, izleme_dk: int,
     if izle:
         m += ["", "👀 <b>İZLE</b> (dönüş mumu bekleniyor, tetik bildirimi yok)"]
         for a in izle:
-            m.append(f"• <b>{e(sembol_adi(a.sembol))}</b> — giriş ~{a.giris:.2f}, "
-                     f"stop {a.stop:.2f}, R/Ö {a.rr:.1f}")
+            m.append(f"• <b>{e(sembol_adi(a.sembol))}</b> — giriş ~{pat.fmt(a.giris)}, "
+                     f"stop {pat.fmt(a.stop)}, R/Ö {a.rr:.1f}")
     if sinyal:
         m += ["", f"⏱ Açılıştan sonra ilk {izleme_dk} dk giriş tetiklerini bildireceğim."]
     m += ["", "<i>Bilgi amaçlıdır, yatırım tavsiyesi değildir.</i>"]
@@ -177,22 +177,22 @@ class Takip:
             # 1) Açılış boşluğu kontrolü (yalnızca ilk kontrolde anlamlı)
             if acilis_fiyati < a.stop:
                 self.durum[s] = "iptal"
-                mesajlar.append(f"❌ {ad} stopun altında açıldı ({acilis_fiyati:.2f} < "
-                                f"{a.stop:.2f}). Kurgu bozuldu, takip bırakıldı.")
+                mesajlar.append(f"❌ {ad} stopun altında açıldı ({pat.fmt(acilis_fiyati)} < "
+                                f"{pat.fmt(a.stop)}). Kurgu bozuldu, takip bırakıldı.")
                 continue
             if acilis_fiyati > a.giris + 0.5 * risk:
                 self.durum[s] = "kaçtı"
                 durum = ("hedefin de üstünde" if acilis_fiyati >= a.hedef else
                          f"bu fiyattan R/Ö {rr_simdi(a, acilis_fiyati):.1f}")
-                mesajlar.append(f"🚀 {ad} boşlukla yukarı açıldı ({acilis_fiyati:.2f}, giriş "
-                                f"{a.giris:.2f}; {durum}) — kovalamayın, geri çekilme bekleyin.")
+                mesajlar.append(f"🚀 {ad} boşlukla yukarı açıldı ({pat.fmt(acilis_fiyati)}, giriş "
+                                f"{pat.fmt(a.giris)}; {durum}) — kovalamayın, geri çekilme bekleyin.")
                 continue
 
             # 2) Stop, girişten önce geldiyse iptal
             if float(d["Low"].min()) <= a.stop and float(d["High"].max()) < a.giris:
                 self.durum[s] = "iptal"
                 mesajlar.append(f"❌ {ad} giriş tetiklenmeden stop seviyesine indi "
-                                f"({a.stop:.2f}). Kurgu iptal.")
+                                f"({pat.fmt(a.stop)}). Kurgu iptal.")
                 continue
 
             # 3) Tetik
@@ -206,8 +206,8 @@ class Takip:
                     r = rr_simdi(a, son)
                     not_ = "" if r >= 1.5 else " ⚠ R/Ö zayıf; stopu açılış aralığının dibine çekmeyi düşünün."
                     mesajlar.append(
-                        f"🟢 {ad} TETİKLENDİ — açılış aralığının tepesini ({ust:.2f}) kırdı. "
-                        f"Fiyat {son:.2f} · Stop {a.stop:.2f} · Hedef {a.hedef:.2f} · "
+                        f"🟢 {ad} TETİKLENDİ — açılış aralığının tepesini ({pat.fmt(ust)}) kırdı. "
+                        f"Fiyat {pat.fmt(son)} · Stop {pat.fmt(a.stop)} · Hedef {pat.fmt(a.hedef)} · "
                         f"Güncel R/Ö {r:.1f}{not_}")
             else:
                 # Sadece fitille değmek yetmez: 5 dk'lık bir mum girişin ÜSTÜNDE KAPANMALI.
@@ -220,13 +220,13 @@ class Takip:
                     r = rr_simdi(a, max(son, a.giris))
                     not_ = "" if r >= 1.5 else " ⚠ Fiyat girişten uzaklaştı, R/Ö zayıfladı."
                     mesajlar.append(
-                        f"🟢 {ad} TETİKLENDİ — giriş {a.giris:.2f} "
+                        f"🟢 {ad} TETİKLENDİ — giriş {pat.fmt(a.giris)} "
                         f"{'üstünde 5 dk kapanış' if pat.AYAR['yeni_kurallar'] else 'geçildi'}. "
-                        f"Fiyat {son:.2f} · Stop {a.stop:.2f} · Hedef {a.hedef:.2f} · "
+                        f"Fiyat {pat.fmt(son)} · Stop {pat.fmt(a.stop)} · Hedef {pat.fmt(a.hedef)} · "
                         f"Güncel R/Ö {r:.1f}{not_}")
                 elif float(d["High"].max()) >= a.giris and not getattr(a, "_fitil_bildirildi", False):
                     a._fitil_bildirildi = True
-                    mesajlar.append(f"🟡 {ad} girişe ({a.giris:.2f}) fitille değdi ama üstünde "
+                    mesajlar.append(f"🟡 {ad} girişe ({pat.fmt(a.giris)}) fitille değdi ama üstünde "
                                     f"kapanamadı. Teyit bekleniyor, henüz girmeyin.")
         return mesajlar
 
