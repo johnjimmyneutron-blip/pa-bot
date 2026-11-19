@@ -12,6 +12,7 @@ Kullanım:
     python price_action_tarayici.py --piyasa bist          (BIST'teki tüm hisseler, ~630)
     python price_action_tarayici.py --piyasa bist_likit    (büyük/likit ~60 hisse, hızlı)
     python price_action_tarayici.py --piyasa sp500 --adet 10
+    python price_action_tarayici.py --piyasa nasdaq100 --saf
     python price_action_tarayici.py --piyasa kripto
     python price_action_tarayici.py --piyasa bist --saf     (saf price action: ortalama yok)
     python price_action_tarayici.py --dosya listem.txt      (her satırda bir Yahoo sembolü)
@@ -56,6 +57,12 @@ AYAR = {
     "yapi_k": 5,                # trend yapısı için daha belirgin swing'ler (iki yanda 5 mum)
     "rol_tolerans_atr": 0.25,   # eski direncin yeniden test edildiği sayılacak yakınlık
     "max_stop_yuzde": 6.0,      # stop bundan uzaksa raporda uyarı çıkar
+    "endeks_filtresi": True,    # piyasanın genel yönünü (endeksi) hesaba kat
+    "endeks_ceza": 2,           # endeks düşüş yapısındaysa alış kurgularından düşülecek puan
+    "bosluk_esik_yuzde": 4.0,   # bu kadar ve üstü aşağı boşluk "kötü haber boşluğu" sayılır
+    "zirve_uzaklik_uyari": 15.0,  # 52 haftalık zirvenin bu kadar % altındaysa uyarı
+    "yeni_kurallar": False,     # ABT sonrası eklenen kurallar: endeks filtresi, göreli güç,
+                                # haber boşluğu, 52H uzaklık ve 5 dk kapanış teyidi (--yeni-kurallar)
     "saf": False,               # True: hareketli ortalama hiç kullanılmaz (--saf ile de açılır)
 }
 
@@ -64,6 +71,7 @@ MIN_ISLEM_DEGERI = {
     "bist": 20_000_000,   # TL
     "bist_likit": 20_000_000,
     "sp500": 5_000_000,   # USD
+    "nasdaq100": 5_000_000,  # USD
     "kripto": 0,
     "dosya": 0,
 }
@@ -126,6 +134,17 @@ SKBNK SOKM TAVHL TCELL THYAO TKFEN TOASO TSKB TTKOM TTRAK TUPRS ULKER VAKBN VESB
 YKBNK ZOREN
 """.split()
 
+# Nasdaq-100 bileşenleri (kaynak: slickcharts.com/nasdaq100, Kasım 2026; 101 sembol çünkü
+# Alphabet'in iki hisse sınıfı var). Endeks her Aralık'ta yenilenir; yılda bir güncelleyin.
+NASDAQ100_SEMBOLLER = """
+NVDA AAPL MSFT AMZN GOOGL GOOG AVGO META TSLA ASML COST MU PLTR AMD NFLX CSCO AZN LRCX
+AMAT INTC TMUS KLAC LIN SHOP PEP APP ISRG AMGN TXN QCOM BKNG GILD INTU PDD ADI HON PANW
+ADBE CRWD ARM VRTX CEG SBUX ADP MELI CMCSA SNPS DASH MAR CDNS ORLY ABNB CTAS REGN MNST
+MDLZ WBD MRVL CSX AEP PCAR ROST NXPI IDXX ADSK FTNT TRI PYPL EA BKR AXON MSTR FAST WDAY
+EXC ROP XEL TTWO FANG DDOG CTSH MCHP CCEP PAYX CPRT GEHC KDP ODFL ZS TEAM VRSK KHC CSGP
+DXCM CHTR ON BIIB LULU GFS TTD CDW
+""".split()
+
 KRIPTO_SEMBOLLER = """
 BTC ETH BNB SOL XRP ADA DOGE TRX AVAX LINK DOT TON SHIB LTC BCH NEAR UNI APT
 ICP ETC XLM FIL ATOM HBAR ARB OP INJ SUI AAVE MKR RNDR GRT ALGO SAND MANA AXS
@@ -156,7 +175,14 @@ def evren(piyasa: str, dosya: str | None) -> list[str]:
         return [f"{s}-USD" for s in KRIPTO_SEMBOLLER]
     if piyasa == "sp500":
         return sp500_sembolleri()
+    if piyasa == "nasdaq100":
+        return list(NASDAQ100_SEMBOLLER)
     raise ValueError(f"Bilinmeyen piyasa: {piyasa}")
+
+
+# Piyasa genel yönü için kullanılan endeks
+ENDEKS = {"sp500": "SPY", "nasdaq100": "QQQ", "bist": "XU100.IS", "bist_likit": "XU100.IS",
+          "kripto": "BTC-USD", "dosya": None}
 
 
 def tradingview_linki(sembol: str) -> str:
@@ -250,6 +276,54 @@ def mum_sinyali(d: pd.DataFrame) -> tuple[str | None, int]:
 # ---------------------------------------------------------------------------
 # Tek enstrüman analizi
 # ---------------------------------------------------------------------------
+def endeks_durumu(d: pd.DataFrame) -> dict:
+    """Endeksin yapısını okur: düşüş yapısında (LH + LL) ya da son belirgin dibin altındaysa zayıf."""
+    yk = AYAR["yapi_k"]
+    c = float(d["Close"].iloc[-1])
+    tepe = pivotlar(d["High"], yk, tepe=True)
+    dip = pivotlar(d["Low"], yk, tepe=False)
+    nedenler = []
+    if len(tepe) >= 2 and len(dip) >= 2 and tepe[-1][1] < tepe[-2][1] and dip[-1][1] < dip[-2][1]:
+        nedenler.append("düşen tepe ve dip yapısında")
+    if dip and c < dip[-1][1]:
+        nedenler.append("son belirgin dibin altında")
+    getiri20 = c / float(d["Close"].iloc[-21]) - 1 if len(d) > 21 else 0.0
+    return {"zayif": bool(nedenler), "aciklama": ", ".join(nedenler), "getiri20": getiri20}
+
+
+def baglam(d: pd.DataFrame, endeks: dict | None) -> tuple[int, list[str], list[str]]:
+    """Kurgudan bağımsız, hissenin genel durumu: endeks, göreli güç, haber boşluğu, 52H zirve."""
+    puan, neden, uyari = 0, [], []
+    c = float(d["Close"].iloc[-1])
+    if endeks and AYAR["endeks_filtresi"]:
+        if endeks["zayif"]:
+            puan -= AYAR["endeks_ceza"]
+            uyari.append(f"Endeks zayıf ({endeks['aciklama']}): alış kurguları daha riskli")
+        if len(d) > 21:
+            fark = (c / float(d["Close"].iloc[-21]) - 1) - endeks["getiri20"]
+            if fark <= -0.05:
+                puan -= 1; uyari.append(f"Son 20 günde endeksten %{-fark * 100:.0f} zayıf")
+            elif fark >= 0.05:
+                puan += 1; neden.append(f"Son 20 günde endeksten %{fark * 100:.0f} güçlü")
+    # Kapanmamış büyük aşağı boşluk (bilanço / kötü haber izi), son ~2 ay
+    son = d.tail(45)
+    onceki_kapanis = d["Close"].shift(1).tail(45)
+    bosluk = (son["Open"] / onceki_kapanis - 1) * 100
+    buyukler = bosluk[bosluk <= -AYAR["bosluk_esik_yuzde"]]
+    if len(buyukler):
+        tarih = buyukler.index[-1]
+        seviye = float(onceki_kapanis.loc[tarih])
+        if c < seviye:
+            puan -= 1
+            uyari.append(f"{tarih:%d.%m} tarihli %{-buyukler.iloc[-1]:.1f} aşağı boşluk kapanmadı "
+                         f"(boşluk öncesi {seviye:.2f}) — bilanço/kötü haber olabilir")
+    yuksek = float(d["High"].tail(250).max())
+    uzak = (1 - c / yuksek) * 100
+    if uzak >= AYAR["zirve_uzaklik_uyari"]:
+        uyari.append(f"52 haftalık zirvenin %{uzak:.0f} altında (büyük resim zayıf olabilir)")
+    return puan, neden, uyari
+
+
 @dataclass
 class Aday:
     sembol: str
@@ -275,7 +349,8 @@ def _stop_uyarisi(aday: Aday) -> None:
         aday.uyarilar.append(f"Stop geniş (%{aday.stop_yuzde:.1f}), pozisyonu küçültün")
 
 
-def analiz_et(sembol: str, d: pd.DataFrame, min_deger: float) -> list[Aday]:
+def analiz_et(sembol: str, d: pd.DataFrame, min_deger: float,
+              endeks: dict | None = None) -> list[Aday]:
     """Sembolü değerlendirir; geçen ve elenen tüm kurguları döndürür (elenme alanı ile)."""
     if len(d) < AYAR["min_bar"]:
         return []
@@ -311,6 +386,7 @@ def analiz_et(sembol: str, d: pd.DataFrame, min_deger: float) -> list[Aday]:
     sma50_yukari = son["SMA50"] > d["SMA50"].iloc[-11]
     ma_trend = (not saf) and c > son["SMA50"] and sma50_yukari
 
+    b_puan, b_neden, b_uyari = baglam(d, endeks) if AYAR["yeni_kurallar"] else (0, [], [])
     sonuc: list[Aday] = []
 
     # ======================= KURGU 1: Trend içi geri çekilme =======================
@@ -399,6 +475,7 @@ def analiz_et(sembol: str, d: pd.DataFrame, min_deger: float) -> list[Aday]:
             uyari.append(f"Hedefe giderken küçük direnç var (~{min(ara):.2f})")
         if not sinyal:
             uyari.append("Dönüş mumu yok: giriş için sinyal mumu bekleyin")
+        puan += b_puan; neden += b_neden; uyari += b_uyari
 
         aday = Aday(sembol, "Geri çekilme", "Sinyal var" if sinyal else "İzle",
                     puan, c, giris, stop, hedef, rr, neden, uyari)
@@ -447,6 +524,7 @@ def analiz_et(sembol: str, d: pd.DataFrame, min_deger: float) -> list[Aday]:
             stop = giris - 0.5 * a
         hedef = giris + AYAR["min_rr"] * (giris - stop)
         neden.append(f"Hedef: ölçülü {AYAR['min_rr']:.0f}R")
+        puan += b_puan; neden += b_neden; uyari += b_uyari
         aday = Aday(sembol, "Kırılım", "Sinyal var", puan, c, giris, stop, hedef,
                     AYAR["min_rr"], neden, uyari)
         _stop_uyarisi(aday)
@@ -529,10 +607,23 @@ def tara(piyasa: str, dosya: str | None = None, adet: int = 10) -> dict:
     veri = veri_indir(semboller)
     eksik = [s for s in semboller if s not in veri]
 
+    endeks = None
+    endeks_sembol = ENDEKS.get(anahtar)
+    if endeks_sembol and AYAR["endeks_filtresi"] and AYAR["yeni_kurallar"]:
+        try:
+            ed = veri_indir([endeks_sembol]).get(endeks_sembol)
+            if ed is not None and len(ed) > AYAR["min_bar"]:
+                endeks = endeks_durumu(ed)
+                endeks["sembol"] = endeks_sembol
+                print(f"Endeks ({endeks_sembol}): "
+                      f"{'ZAYIF — ' + endeks['aciklama'] if endeks['zayif'] else 'normal'}")
+        except Exception as e:
+            print(f"Endeks verisi alınamadı: {e}", file=sys.stderr)
+
     tum: list[Aday] = []
     for s, d in veri.items():
         try:
-            tum.extend(analiz_et(s, d, MIN_ISLEM_DEGERI[anahtar]))
+            tum.extend(analiz_et(s, d, MIN_ISLEM_DEGERI[anahtar], endeks))
         except Exception as e:  # tek sembol hatası taramayı durdurmasın
             print(f"  {s} atlandı: {e}", file=sys.stderr)
 
@@ -546,7 +637,8 @@ def tara(piyasa: str, dosya: str | None = None, adet: int = 10) -> dict:
     sirali = sorted(en_iyi.values(), key=lambda a: (a.puan, a.rr), reverse=True)
     return {"sinyal": [a for a in sirali if a.durum == "Sinyal var"][:adet],
             "izle": [a for a in sirali if a.durum == "İzle"][:adet],
-            "sirali": sirali, "elenen": elenen, "veri": veri, "eksik": eksik}
+            "sirali": sirali, "elenen": elenen, "veri": veri, "eksik": eksik,
+            "endeks": endeks}
 
 
 def seans_uyarisi(piyasa: str) -> str | None:
@@ -556,6 +648,7 @@ def seans_uyarisi(piyasa: str) -> str | None:
         return ("Kripto 7/24 işlem görür: son günlük mum henüz kapanmadı (UTC 00:00'da kapanır). "
                 "Mum ve hacim kuralları için kapanıştan hemen sonra tarayın.")
     saatler = {"sp500": ("America/New_York", (9, 30), (16, 0)),
+               "nasdaq100": ("America/New_York", (9, 30), (16, 0)),
                "bist": ("Europe/Istanbul", (10, 0), (18, 10)),
                "bist_likit": ("Europe/Istanbul", (10, 0), (18, 10))}
     if piyasa not in saatler:
@@ -570,7 +663,7 @@ def seans_uyarisi(piyasa: str) -> str | None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Price action tarayıcı")
-    ap.add_argument("--piyasa", choices=["bist", "bist_likit", "sp500", "kripto"], default="bist")
+    ap.add_argument("--piyasa", choices=["bist", "bist_likit", "sp500", "nasdaq100", "kripto"], default="bist")
     ap.add_argument("--dosya", help="Sembol listesi dosyası (her satırda bir Yahoo sembolü)")
     ap.add_argument("--adet", type=int, default=10, help="Her bölümde listelenecek aday sayısı")
     ap.add_argument("--saf", action="store_true",

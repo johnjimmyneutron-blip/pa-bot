@@ -37,9 +37,13 @@ import price_action_tarayici as pat
 # Piyasa -> (saat dilimi, açılış saati)
 SEANS = {
     "sp500": ("America/New_York", (9, 30)),
+    "nasdaq100": ("America/New_York", (9, 30)),
     "bist": ("Europe/Istanbul", (10, 0)),
     "bist_likit": ("Europe/Istanbul", (10, 0)),
 }
+PIYASA_ADI = {"sp500": "S&P 500", "nasdaq100": "Nasdaq-100", "bist": "BIST",
+              "bist_likit": "BIST likit"}
+ETIKET = ""   # her mesajın başına eklenir; main() içinde piyasa adıyla doldurulur
 KONTROL_ARALIGI_DK = 5
 ACILIS_ARALIGI_DK = 15   # kırılımlarda açılış aralığı (ilk 15 dakika)
 
@@ -48,6 +52,8 @@ ACILIS_ARALIGI_DK = 15   # kırılımlarda açılış aralığı (ilk 15 dakika)
 # Telegram
 # ---------------------------------------------------------------------------
 def telegram(metin: str) -> None:
+    if ETIKET:
+        metin = f"<b>[{html.escape(ETIKET)}]</b> " + metin
     token = os.environ.get("TELEGRAM_TOKEN")
     chat = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat:
@@ -86,10 +92,18 @@ def sembol_adi(s: str) -> str:
 # ---------------------------------------------------------------------------
 # Mesaj biçimleri
 # ---------------------------------------------------------------------------
-def liste_mesaji(sinyal, izle, piyasa: str, taranan: int, izleme_dk: int) -> str:
+def liste_mesaji(sinyal, izle, piyasa: str, taranan: int, izleme_dk: int,
+                 endeks: dict | None = None) -> str:
     mod = "SAF" if pat.AYAR["saf"] else "standart"
-    m = [f"📊 <b>{e(piyasa.upper())} açılış öncesi tarama</b> ({mod})",
-         f"{datetime.now():%d.%m.%Y} · {taranan} hisse tarandı", ""]
+    m = [f"📊 <b>{e(PIYASA_ADI.get(piyasa, piyasa.upper()))} açılış öncesi tarama</b> ({mod})",
+         f"{datetime.now():%d.%m.%Y} · {taranan} hisse tarandı"]
+    if endeks:
+        if endeks["zayif"]:
+            m.append(f"🔴 <b>Piyasa zayıf</b>: {e(endeks['sembol'])} {e(endeks['aciklama'])}. "
+                     f"Adayların puanı düşürüldü; pozisyonları küçük tutun.")
+        else:
+            m.append(f"🟢 Piyasa yapısı normal ({e(endeks['sembol'])}).")
+    m.append("")
     if sinyal:
         m.append("✅ <b>SİNYAL VAR</b>")
         for i, a in enumerate(sinyal, 1):
@@ -196,13 +210,24 @@ class Takip:
                         f"Fiyat {son:.2f} · Stop {a.stop:.2f} · Hedef {a.hedef:.2f} · "
                         f"Güncel R/Ö {r:.1f}{not_}")
             else:
-                if float(d["High"].max()) >= a.giris:
+                # Sadece fitille değmek yetmez: 5 dk'lık bir mum girişin ÜSTÜNDE KAPANMALI.
+                # (Fitille değip geri düşmek, alıcıların tutunamadığını gösterir.)
+                kapanislar = d["Close"]
+                teyit = (kapanislar >= a.giris).any() if pat.AYAR["yeni_kurallar"] \
+                    else float(d["High"].max()) >= a.giris
+                if teyit:
                     self.durum[s] = "tetiklendi"
                     r = rr_simdi(a, max(son, a.giris))
                     not_ = "" if r >= 1.5 else " ⚠ Fiyat girişten uzaklaştı, R/Ö zayıfladı."
                     mesajlar.append(
-                        f"🟢 {ad} TETİKLENDİ — giriş {a.giris:.2f} geçildi. Fiyat {son:.2f} · "
-                        f"Stop {a.stop:.2f} · Hedef {a.hedef:.2f} · Güncel R/Ö {r:.1f}{not_}")
+                        f"🟢 {ad} TETİKLENDİ — giriş {a.giris:.2f} "
+                        f"{'üstünde 5 dk kapanış' if pat.AYAR['yeni_kurallar'] else 'geçildi'}. "
+                        f"Fiyat {son:.2f} · Stop {a.stop:.2f} · Hedef {a.hedef:.2f} · "
+                        f"Güncel R/Ö {r:.1f}{not_}")
+                elif float(d["High"].max()) >= a.giris and not getattr(a, "_fitil_bildirildi", False):
+                    a._fitil_bildirildi = True
+                    mesajlar.append(f"🟡 {ad} girişe ({a.giris:.2f}) fitille değdi ama üstünde "
+                                    f"kapanamadı. Teyit bekleniyor, henüz girmeyin.")
         return mesajlar
 
     def ozet(self) -> str:
@@ -216,6 +241,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Açılış botu (tarama + Telegram + tetik takibi)")
     ap.add_argument("--piyasa", choices=list(SEANS), default="sp500")
     ap.add_argument("--saf", action="store_true", help="Saf price action modu")
+    ap.add_argument("--yeni-kurallar", action="store_true",
+                    help="Endeks filtresi, haber boşluğu ve kapanış teyidi kurallarını aç")
     ap.add_argument("--adet", type=int, default=8, help="Her bölümde en fazla aday")
     ap.add_argument("--izleme", type=int, default=45, help="Açılıştan sonra izleme süresi (dk)")
     ap.add_argument("--max-bekleme", type=int, default=40,
@@ -227,12 +254,16 @@ def main() -> None:
     ap.add_argument("--telegram-test", action="store_true", help="Sadece test mesajı gönder")
     args = ap.parse_args()
 
+    global ETIKET
+    ETIKET = PIYASA_ADI.get(args.piyasa, args.piyasa)
     if args.telegram_test:
         telegram("✅ Price action botu bağlantı testi başarılı.")
         print("Test mesajı gönderildi.")
         return
     if args.saf:
         pat.AYAR["saf"] = True
+    if args.yeni_kurallar:
+        pat.AYAR["yeni_kurallar"] = True
 
     tz, (sa, dk) = SEANS[args.piyasa]
     simdi = datetime.now(ZoneInfo(tz))
@@ -256,7 +287,8 @@ def main() -> None:
     sinyal, izle = t["sinyal"], t["izle"]
     if kalan < 0 and not args.test:
         print("UYARI: Açılıştan sonra başladı; son günlük mum yarım olabilir.")
-    telegram(liste_mesaji(sinyal, izle, args.piyasa, len(t["veri"]), args.izleme))
+    telegram(liste_mesaji(sinyal, izle, args.piyasa, len(t["veri"]), args.izleme,
+                          t.get("endeks")))
     if not sinyal:
         return
 
