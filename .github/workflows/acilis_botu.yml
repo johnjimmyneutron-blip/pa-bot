@@ -7,9 +7,15 @@ on:
         description: "Test modu (saat kontrolü yok, hemen tara ve bir kez kontrol et)"
         type: boolean
         default: true
+      piyasa:
+        description: "Taranacak piyasa"
+        type: choice
+        options: [sp500, nasdaq100]
+        default: sp500
 
+# Her piyasa kendi kuyruğunda: S&P 500 ve Nasdaq-100 aynı anda, birbirini beklemeden çalışır
 concurrency:
-  group: acilis-botu
+  group: acilis-botu-${{ inputs.piyasa || 'sp500' }}
   cancel-in-progress: false
 
 jobs:
@@ -27,9 +33,11 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PIYASA: ${{ inputs.piyasa || 'sp500' }}
+          TEST: ${{ inputs.test }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.test }}" = "true" ]; then
-            python acilis_botu.py --piyasa sp500 --saf --test
+          if [ "$TEST" = "true" ]; then
+            python acilis_botu.py --piyasa "$PIYASA" --saf --test
           else
-            python acilis_botu.py --piyasa sp500 --saf
+            python acilis_botu.py --piyasa "$PIYASA" --saf
           fi
